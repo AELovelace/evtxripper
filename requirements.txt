@@ -1,0 +1,4 @@
+# Chainsaw Frontend Dependencies
+python-dotenv==1.0.0
+pysmb==1.2.8
+windows-curses==2.4.2a2; platform_system == "Windows"
