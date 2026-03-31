@@ -10,6 +10,7 @@ import subprocess
 import json
 import csv
 import ntpath
+import re
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
@@ -18,6 +19,17 @@ import smb.SMBConnection
 import logging
 from dotenv import load_dotenv
 from enum import Enum
+from evtx_core import (
+    ChainsawConfig,
+    ChainsawRunner,
+    sanitize_for_filename as core_sanitize_for_filename,
+    build_results_folder_name as core_build_results_folder_name,
+    create_run_results_dir as core_create_run_results_dir,
+    has_sigma_rules as core_has_sigma_rules,
+    extract_error_summary as core_extract_error_summary,
+    find_sigma_csv as core_find_sigma_csv,
+    generate_sigma_reports as core_generate_sigma_reports,
+)
 
 try:
     import curses
@@ -40,20 +52,6 @@ class OperationMode(Enum):
     """Operation modes for Chainsaw"""
     HUNT = "hunt"
     SEARCH = "search"
-
-
-@dataclass
-class ChainsawConfig:
-    """Chainsaw configuration"""
-    executable: str
-    sigma_path: str
-    rules_path: str
-    mapping_file: str
-    output_format: str
-    timezone: str
-    column_width: int
-    skip_errors: bool
-    load_unknown: bool
 
 
 @dataclass
@@ -171,145 +169,6 @@ class SMBBrowser:
             return False
 
 
-class ChainsawRunner:
-    """Handles Chainsaw execution"""
-
-    def __init__(self, config: ChainsawConfig):
-        self.config = config
-
-    def build_hunt_command(
-        self,
-        evtx_paths: List[str],
-        output_file: Optional[str] = None,
-        use_sigma: bool = True,
-        use_rules: bool = True,
-        from_date: Optional[str] = None,
-        to_date: Optional[str] = None,
-        full_output: bool = False,
-        metadata: bool = False,
-        log_format: bool = False
-    ) -> List[str]:
-        """Build chainsaw hunt command"""
-        cmd = [self.config.executable, "hunt"]
-
-        if use_sigma:
-            cmd.extend(["-s", self.config.sigma_path])
-            cmd.extend(["-m", self.config.mapping_file])
-
-        if use_rules and os.path.isdir(self.config.rules_path):
-            cmd.extend(["-r", self.config.rules_path])
-
-        if self.config.output_format == "csv":
-            cmd.append("--csv")
-        elif self.config.output_format == "json":
-            cmd.append("--json")
-
-        if output_file:
-            cmd.extend(["-o", output_file])
-
-        if from_date:
-            cmd.extend(["--from", from_date])
-
-        if to_date:
-            cmd.extend(["--to", to_date])
-
-        if full_output:
-            cmd.append("--full")
-
-        if metadata:
-            cmd.append("--metadata")
-
-        if log_format:
-            cmd.append("--log")
-
-        if self.config.skip_errors:
-            cmd.append("--skip-errors")
-
-        if self.config.load_unknown:
-            cmd.append("--load-unknown")
-
-        cmd.extend([f"--timezone", self.config.timezone])
-        cmd.extend([f"--column-width", str(self.config.column_width)])
-
-        cmd.extend(evtx_paths)
-
-        return cmd
-
-    def build_search_command(
-        self,
-        evtx_paths: List[str],
-        pattern: str = "",
-        output_file: Optional[str] = None,
-        regex_patterns: Optional[List[str]] = None,
-        tau_expressions: Optional[List[str]] = None,
-        ignore_case: bool = False,
-        from_date: Optional[str] = None,
-        to_date: Optional[str] = None,
-        json_output: bool = False
-    ) -> List[str]:
-        """Build chainsaw search command"""
-        cmd = [self.config.executable, "search"]
-
-        if json_output:
-            cmd.append("--json")
-
-        if output_file:
-            cmd.extend(["-o", output_file])
-
-        if ignore_case:
-            cmd.append("-i")
-
-        if from_date:
-            cmd.extend(["--from", from_date])
-
-        if to_date:
-            cmd.extend(["--to", to_date])
-
-        if regex_patterns:
-            for pattern in regex_patterns:
-                cmd.extend(["-e", pattern])
-
-        if tau_expressions:
-            for expr in tau_expressions:
-                cmd.extend(["-t", expr])
-
-        cmd.extend(["-timezone", self.config.timezone])
-
-        if pattern and not regex_patterns and not tau_expressions:
-            cmd.append(pattern)
-
-        cmd.extend(evtx_paths)
-
-        return cmd
-
-    def run_command(self, cmd: List[str]) -> Tuple[bool, str]:
-        """Execute chainsaw command"""
-        try:
-            sanitized_cmd = [str(part) for part in cmd if part is not None]
-            logger.info(f"Running command: {' '.join(sanitized_cmd)}")
-            result = subprocess.run(
-                sanitized_cmd,
-                capture_output=True,
-                text=True,
-                timeout=300
-            )
-            output = (result.stdout or "") + (result.stderr or "")
-            if result.returncode == 0:
-                logger.info("Chainsaw execution successful")
-                return True, output
-            else:
-                logger.error(f"Chainsaw execution failed: {output}")
-                return False, output
-        except subprocess.TimeoutExpired:
-            error_msg = "Chainsaw execution timeout"
-            logger.error(error_msg)
-            return False, error_msg
-        except Exception as e:
-            error_msg = f"Error running chainsaw: {str(e)}"
-            logger.error(error_msg)
-            return False, error_msg
-
-
 class ChainsawUI:
     """Ncurses UI for Chainsaw frontend"""
 
@@ -329,8 +188,87 @@ class ChainsawUI:
         self.hunt_menu_index = 0
         self.search_menu_index = 0
         self.config_menu_index = 0
+        self.stdscr = None
+        self.current_run_dir = ""
+
+        self.hunt_use_sigma = True
+        self.hunt_use_custom_rules = True
+        self.hunt_output_format = os.getenv('CHAINSAW_OUTPUT_FORMAT', 'csv').lower()
+        self.hunt_full_output = False
+        self.hunt_include_metadata = False
+
+        self.search_pattern = ""
+        self.search_regex_patterns: List[str] = []
+        self.search_tau_expressions: List[str] = []
+        self.search_ignore_case = False
+        self.search_output_format = "json"
+
         self.message = ""
         self.message_type = "info"  # info, error, success
+
+    @staticmethod
+    def _sanitize_for_filename(value: str, fallback: str = "result") -> str:
+        """Sanitize a value for filesystem-safe folder/file naming."""
+        return core_sanitize_for_filename(value, fallback)
+
+    def _build_results_folder_name(self, source_files: List[str]) -> str:
+        """Build results folder name in required format."""
+        return core_build_results_folder_name(source_files)
+
+    def _create_run_results_dir(self, source_files: List[str]) -> str:
+        """Create and return a per-run output folder."""
+        root = os.getenv('OUTPUT_PATH', './chainsaw_results')
+        run_dir = core_create_run_results_dir(source_files, root)
+        self.current_run_dir = run_dir
+        return run_dir
+
+    def _prompt_user_input(self, prompt: str, default: str = "") -> Optional[str]:
+        """Prompt for user text input inside curses UI."""
+        if not self.stdscr:
+            return None
+
+        height, width = self.stdscr.getmaxyx()
+        max_input_len = max(10, width - len(prompt) - 6)
+        y = max(1, height - 1)
+
+        curses.echo()
+        try:
+            curses.curs_set(1)
+        except curses.error:
+            pass
+
+        try:
+            self.stdscr.move(y, 0)
+            self.stdscr.clrtoeol()
+            full_prompt = f"{prompt}: "
+            self.stdscr.addstr(y, 0, full_prompt[:width - 1])
+            if default:
+                self.stdscr.addstr(y, min(len(full_prompt), width - 1), default[:max_input_len])
+                self.stdscr.move(y, min(len(full_prompt) + len(default), width - 1))
+            self.stdscr.refresh()
+
+            raw = self.stdscr.getstr(y, len(full_prompt), max_input_len)
+            text = raw.decode('utf-8', errors='ignore').strip()
+            if not text:
+                return default
+            return text
+        finally:
+            curses.noecho()
+            try:
+                curses.curs_set(0)
+            except curses.error:
+                pass
+
+    def _find_sigma_csv(self, run_dir: str) -> Optional[str]:
+        """Find sigma.csv generated by chainsaw hunt in a run directory."""
+        return core_find_sigma_csv(run_dir)
+
+    def _generate_sigma_reports(self, run_dir: str, source_evtx_files: List[str]) -> Tuple[int, str]:
+        """Send sigma CSV to Ollama and write markdown reports per EVTX."""
+        report_count, errors = core_generate_sigma_reports(run_dir, source_evtx_files)
+        if errors:
+            logger.error(f"Ollama report generation issues: {errors}")
+        return report_count, errors
 
     def _refresh_browser_files(self):
         """Refresh browser file listing from SMB share."""
@@ -388,6 +326,7 @@ class ChainsawUI:
             local_path = os.path.join(target_dir, filename)
             if self.smb_browser.download_file(remote_path, local_path):
                 downloaded_count += 1
+                self._download_remote_manifest(remote_path, local_path)
                 if local_path not in self.selected_files:
                     self.selected_files.append(local_path)
 
@@ -407,6 +346,7 @@ class ChainsawUI:
         local_path = os.path.join(target_dir, filename)
 
         if self.smb_browser.download_file(remote_path, local_path):
+            self._download_remote_manifest(remote_path, local_path)
             if local_path not in self.selected_files:
                 self.selected_files.append(local_path)
             self.message = f"Downloaded: {filename}. Ready for hunt/search: {len(self.selected_files)}"
@@ -414,6 +354,20 @@ class ChainsawUI:
         else:
             self.message = f"Download failed: {filename}"
             self.message_type = "error"
+
+    def _download_remote_manifest(self, remote_evtx_path: str, local_evtx_path: str):
+        """Best-effort download of provenance manifest adjacent to EVTX."""
+        remote_base = remote_evtx_path.rstrip('/')
+        local_manifest_path = f"{local_evtx_path}.manifest.json"
+
+        candidates = [
+            f"{remote_base}.manifest.json",
+            f"{os.path.splitext(remote_base)[0]}.manifest.json",
+        ]
+
+        for remote_manifest_path in candidates:
+            if self.smb_browser.download_file(remote_manifest_path, local_manifest_path):
+                return
 
     def _activate_main_menu_item(self):
         """Activate highlighted item in the main menu."""
@@ -432,23 +386,67 @@ class ChainsawUI:
 
     def _activate_hunt_menu_item(self):
         """Activate highlighted item in hunt menu."""
-        if self.hunt_menu_index == 5:
+        if self.hunt_menu_index == 0:
+            self.hunt_use_sigma = not self.hunt_use_sigma
+            self.message = f"Use Sigma Rules: {'ON' if self.hunt_use_sigma else 'OFF'}"
+            self.message_type = "info"
+        elif self.hunt_menu_index == 1:
+            self.hunt_use_custom_rules = not self.hunt_use_custom_rules
+            self.message = f"Use Custom Rules: {'ON' if self.hunt_use_custom_rules else 'OFF'}"
+            self.message_type = "info"
+        elif self.hunt_menu_index == 2:
+            formats = ["csv", "json", "log"]
+            idx = formats.index(self.hunt_output_format) if self.hunt_output_format in formats else 0
+            self.hunt_output_format = formats[(idx + 1) % len(formats)]
+            self.message = f"Hunt Output Format: {self.hunt_output_format.upper()}"
+            self.message_type = "info"
+        elif self.hunt_menu_index == 3:
+            self.hunt_full_output = not self.hunt_full_output
+            self.message = f"Full Output: {'ON' if self.hunt_full_output else 'OFF'}"
+            self.message_type = "info"
+        elif self.hunt_menu_index == 4:
+            self.hunt_include_metadata = not self.hunt_include_metadata
+            self.message = f"Include Metadata: {'ON' if self.hunt_include_metadata else 'OFF'}"
+            self.message_type = "info"
+        elif self.hunt_menu_index == 5:
             self._run_hunt()
         elif self.hunt_menu_index == 6:
             self.current_menu = "main"
-        else:
-            self.message = "This option is not implemented yet"
-            self.message_type = "warning"
 
     def _activate_search_menu_item(self):
         """Activate highlighted item in search menu."""
-        if self.search_menu_index == 5:
+        if self.search_menu_index == 0:
+            pattern = self._prompt_user_input("Search pattern", self.search_pattern)
+            if pattern is not None:
+                self.search_pattern = pattern.strip()
+                self.message = f"Pattern set: {self.search_pattern or '(empty)'}"
+                self.message_type = "info"
+        elif self.search_menu_index == 1:
+            regex_value = self._prompt_user_input("Regex patterns (comma separated)", ", ".join(self.search_regex_patterns))
+            if regex_value is not None:
+                self.search_regex_patterns = [p.strip() for p in regex_value.split(',') if p.strip()]
+                self.message = f"Regex count: {len(self.search_regex_patterns)}"
+                self.message_type = "info"
+        elif self.search_menu_index == 2:
+            tau_value = self._prompt_user_input("TAU expressions (comma separated)", ", ".join(self.search_tau_expressions))
+            if tau_value is not None:
+                self.search_tau_expressions = [p.strip() for p in tau_value.split(',') if p.strip()]
+                self.message = f"TAU expression count: {len(self.search_tau_expressions)}"
+                self.message_type = "info"
+        elif self.search_menu_index == 3:
+            self.search_ignore_case = not self.search_ignore_case
+            self.message = f"Ignore Case: {'ON' if self.search_ignore_case else 'OFF'}"
+            self.message_type = "info"
+        elif self.search_menu_index == 4:
+            formats = ["json", "text"]
+            idx = formats.index(self.search_output_format) if self.search_output_format in formats else 0
+            self.search_output_format = formats[(idx + 1) % len(formats)]
+            self.message = f"Search Output Format: {self.search_output_format.upper()}"
+            self.message_type = "info"
+        elif self.search_menu_index == 5:
             self._run_search()
         elif self.search_menu_index == 6:
             self.current_menu = "main"
-        else:
-            self.message = "This option is not implemented yet"
-            self.message_type = "warning"
 
     def _load_smb_config(self) -> SMBConfig:
         """Load SMB configuration from environment"""
@@ -475,8 +473,17 @@ class ChainsawUI:
             load_unknown=os.getenv('CHAINSAW_LOAD_UNKNOWN', 'false').lower() == 'true'
         )
 
+    def _has_sigma_rules(self, sigma_path: str) -> bool:
+        """Best-effort check to ensure sigma path contains detection rules, not only mapping files."""
+        return core_has_sigma_rules(sigma_path)
+
+    def _extract_error_summary(self, output: str) -> str:
+        """Get a concise, readable error line from tool output."""
+        return core_extract_error_summary(output)
+
     def run(self, stdscr):
         """Main UI loop"""
+        self.stdscr = stdscr
         curses.curs_set(0)
         stdscr.nodelay(False)
         stdscr.keypad(True)
@@ -607,11 +614,11 @@ class ChainsawUI:
         stdscr.addstr(3, 2, "=" * (width - 4))
 
         options = [
-            "1. Use Sigma Rules (current: ON)",
-            "2. Use Custom Rules (current: ON)",
-            "3. Output Format (current: " + self.chainsaw_config.output_format.upper() + ")",
-            "4. Full Output (current: OFF)",
-            "5. Include Metadata (current: OFF)",
+            "1. Use Sigma Rules (current: " + ("ON" if self.hunt_use_sigma else "OFF") + ")",
+            "2. Use Custom Rules (current: " + ("ON" if self.hunt_use_custom_rules else "OFF") + ")",
+            "3. Output Format (current: " + self.hunt_output_format.upper() + ")",
+            "4. Full Output (current: " + ("ON" if self.hunt_full_output else "OFF") + ")",
+            "5. Include Metadata (current: " + ("ON" if self.hunt_include_metadata else "OFF") + ")",
             "6. Run Hunt",
             "0. Back"
         ]
@@ -633,11 +640,11 @@ class ChainsawUI:
         stdscr.addstr(3, 2, "=" * (width - 4))
 
         options = [
-            "1. Enter Search Pattern",
-            "2. Enter Regex Pattern",
-            "3. Enter TAU Expression",
-            "4. Ignore Case (current: OFF)",
-            "5. Output Format (current: " + self.chainsaw_config.output_format.upper() + ")",
+            "1. Enter Search Pattern (current: " + (self.search_pattern if self.search_pattern else "(empty)") + ")",
+            "2. Enter Regex Pattern (count: " + str(len(self.search_regex_patterns)) + ")",
+            "3. Enter TAU Expression (count: " + str(len(self.search_tau_expressions)) + ")",
+            "4. Ignore Case (current: " + ("ON" if self.search_ignore_case else "OFF") + ")",
+            "5. Output Format (current: " + self.search_output_format.upper() + ")",
             "6. Run Search",
             "0. Back"
         ]
@@ -789,6 +796,9 @@ class ChainsawUI:
 
             if key == ord('6'):
                 self._run_hunt()
+            elif key in {ord('1'), ord('2'), ord('3'), ord('4'), ord('5')}:
+                self.hunt_menu_index = int(chr(key)) - 1
+                self._activate_hunt_menu_item()
             elif key == ord('0'):
                 self.current_menu = "main"
         elif self.current_menu == "search_options":
@@ -805,6 +815,9 @@ class ChainsawUI:
 
             if key == ord('6'):
                 self._run_search()
+            elif key in {ord('1'), ord('2'), ord('3'), ord('4'), ord('5')}:
+                self.search_menu_index = int(chr(key)) - 1
+                self._activate_search_menu_item()
             elif key == ord('0'):
                 self.current_menu = "main"
         elif self.current_menu == "config":
@@ -819,25 +832,56 @@ class ChainsawUI:
             self.message_type = "error"
             return
 
+        sigma_ready = self.hunt_use_sigma and self._has_sigma_rules(self.chainsaw_config.sigma_path)
+        rules_ready = self.hunt_use_custom_rules and bool(self.chainsaw_config.rules_path and os.path.isdir(self.chainsaw_config.rules_path))
+
+        if not sigma_ready and not rules_ready:
+            self.message = "No detection rules found. Set CHAINSAW_SIGMA_PATH to Sigma rules (not mappings)."
+            self.message_type = "error"
+            return
+
         self.message = "Running Chainsaw hunt..."
         self.message_type = "info"
 
-        output_file = os.path.join(
-            os.getenv('OUTPUT_PATH', './chainsaw_results'),
-            f"hunt_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-        )
+        run_dir = self._create_run_results_dir(self.selected_files)
+        output_target = os.path.join(run_dir, "hunt-output")
 
         cmd = self.chainsaw_runner.build_hunt_command(
             self.selected_files,
-            output_file=output_file
+            output_file=output_target,
+            output_format=self.hunt_output_format,
+            use_sigma=sigma_ready,
+            use_rules=rules_ready,
+            full_output=self.hunt_full_output,
+            metadata=self.hunt_include_metadata,
+            log_format=self.hunt_output_format == "log"
         )
 
         success, output = self.chainsaw_runner.run_command(cmd)
         if success:
-            self.message = f"Hunt completed. Results saved to: {output_file}"
-            self.message_type = "success"
+            report_count = 0
+            report_err = ""
+            try:
+                report_count, report_err = self._generate_sigma_reports(run_dir, self.selected_files)
+            except Exception as e:
+                logger.error(f"Report generation failed: {e}", exc_info=True)
+                report_err = str(e)
+
+            if report_count > 0:
+                self.message = f"Hunt completed. Folder: {run_dir}. Reports generated: {report_count}"
+                self.message_type = "success"
+            elif report_err == "Ollama reporting is disabled":
+                self.message = f"Hunt completed. Folder: {run_dir}. Ollama reporting disabled."
+                self.message_type = "success"
+            elif report_err:
+                self.message = f"Hunt completed. Folder: {run_dir}. Report generation warning: {report_err[:90]}"
+                self.message_type = "warning"
+            else:
+                self.message = f"Hunt completed. Folder: {run_dir}"
+                self.message_type = "success"
         else:
-            self.message = f"Hunt failed: {output[:100]}"
+            summary = self._extract_error_summary(output)
+            self.message = f"Hunt failed: {summary[:180]}"
             self.message_type = "error"
 
     def _run_search(self):
@@ -847,27 +891,36 @@ class ChainsawUI:
             self.message_type = "error"
             return
 
+        if not self.search_pattern and not self.search_regex_patterns and not self.search_tau_expressions:
+            self.message = "Set a search pattern, regex, or TAU expression first"
+            self.message_type = "error"
+            return
+
         self.message = "Running Chainsaw search..."
         self.message_type = "info"
 
-        output_file = os.path.join(
-            os.getenv('OUTPUT_PATH', './chainsaw_results'),
-            f"search_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-        )
+        run_dir = self._create_run_results_dir(self.selected_files)
+        extension = "json" if self.search_output_format == "json" else "txt"
+        output_file = os.path.join(run_dir, f"search-output.{extension}")
 
         cmd = self.chainsaw_runner.build_search_command(
             self.selected_files,
-            pattern="malicious|suspicious",
+            pattern=self.search_pattern,
             output_file=output_file,
-            json_output=True
+            output_format=self.search_output_format,
+            regex_patterns=self.search_regex_patterns,
+            tau_expressions=self.search_tau_expressions,
+            ignore_case=self.search_ignore_case,
+            json_output=self.search_output_format == "json"
         )
 
         success, output = self.chainsaw_runner.run_command(cmd)
         if success:
-            self.message = f"Search completed. Results saved to: {output_file}"
+            self.message = f"Search completed. Folder: {run_dir}"
             self.message_type = "success"
         else:
-            self.message = f"Search failed: {output[:100]}"
+            summary = self._extract_error_summary(output)
+            self.message = f"Search failed: {summary[:180]}"
             self.message_type = "error"
 
     def _show_selected_files(self):

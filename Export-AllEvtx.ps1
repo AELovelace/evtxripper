@@ -58,6 +58,59 @@ function Export-WithWevtutil {
     }
 }
 
+function Get-LogOriginalPath {
+    param(
+        [Parameter(Mandatory)]
+        [object]$LogDefinition
+    )
+
+    if ($LogDefinition.PSObject.Properties['LogFilePath'] -and $LogDefinition.LogFilePath) {
+        return [string]$LogDefinition.LogFilePath
+    }
+
+    if ($LogDefinition.PSObject.Properties['FilePath'] -and $LogDefinition.FilePath) {
+        return [string]$LogDefinition.FilePath
+    }
+
+    if ($LogDefinition.PSObject.Properties['Path'] -and $LogDefinition.Path) {
+        return [string]$LogDefinition.Path
+    }
+
+    return $null
+}
+
+function Write-ProvenanceManifest {
+    param(
+        [Parameter(Mandatory)]
+        [string]$ExportedEvtxPath,
+
+        [Parameter(Mandatory)]
+        [object[]]$LogDefinitions
+    )
+
+    $manifestPath = '{0}.manifest.json' -f $ExportedEvtxPath
+
+    $channels = foreach ($log in $LogDefinitions) {
+        [pscustomobject]@{
+            Channel      = [string]$log.LogName
+            OriginalPath = Get-LogOriginalPath -LogDefinition $log
+            IsEnabled    = [bool]$log.IsEnabled
+            RecordCount  = if ($log.PSObject.Properties['RecordCount']) { $log.RecordCount } else { $null }
+        }
+    }
+
+    $manifest = [pscustomobject]@{
+        ManifestVersion = 1
+        GeneratedUtc    = (Get-Date).ToUniversalTime().ToString('o')
+        Hostname        = $env:COMPUTERNAME
+        ExportedEvtx    = (Split-Path -Path $ExportedEvtxPath -Leaf)
+        Channels        = $channels
+    }
+
+    $manifest | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+    return $manifestPath
+}
+
 function Resolve-SharePassword {
     param(
         [string]$AteraPassword,
@@ -147,9 +200,10 @@ if (Test-Path -LiteralPath $outputPath) {
     throw "Output file already exists: $outputPath"
 }
 
-$logNames = Get-WinEvent -ListLog * -Force -ErrorAction SilentlyContinue |
-    Where-Object { $_.IsEnabled -and -not [string]::IsNullOrWhiteSpace($_.LogName) } |
-    Select-Object -ExpandProperty LogName
+$logDefinitions = Get-WinEvent -ListLog * -Force -ErrorAction SilentlyContinue |
+    Where-Object { $_.IsEnabled -and -not [string]::IsNullOrWhiteSpace($_.LogName) }
+
+$logNames = $logDefinitions | Select-Object -ExpandProperty LogName
 
 if (-not $logNames) {
     throw 'No enabled event logs were found to export.'
@@ -158,9 +212,13 @@ if (-not $logNames) {
 $query = New-StructuredQuery -LogNames $logNames
 
 Export-WithWevtutil -Query $query -TargetFilePath $outputPath
+$manifestPath = Write-ProvenanceManifest -ExportedEvtxPath $outputPath -LogDefinitions $logDefinitions
 
 if ($CopyToRemoteShare) {
     $remotePath = Copy-ToRemoteShare -LocalFilePath $outputPath -ShareRoot $RemoteShareRoot -ShareDirectory $RemoteDirectory -ShareUsername $Username -AteraPassword $AteraInputPassword -ProvidedPassword $Password
+    if (Test-Path -LiteralPath $manifestPath) {
+        $null = Copy-ToRemoteShare -LocalFilePath $manifestPath -ShareRoot $RemoteShareRoot -ShareDirectory $RemoteDirectory -ShareUsername $Username -AteraPassword $AteraInputPassword -ProvidedPassword $Password
+    }
     Write-Output $remotePath
 }
 

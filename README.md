@@ -63,6 +63,7 @@ Helper script for:
 ### 4. **Documentation**
 - **QUICKSTART.md** - Get started in 5 minutes ⭐ START HERE
 - **SETUP.md** - Comprehensive setup and advanced usage
+- **WAZUH_CHAINSAW_SUPPLEMENT.md** - Near-real-time Wazuh + Chainsaw integration
 - **README.md** - This file, architecture overview
 
 ---
@@ -94,6 +95,20 @@ SMB_DOMAIN=COMPANY
 python chainsaw_frontend.py
 ```
 
+### Step 5: Build Windows Executables (Optional)
+```PowerShell
+./Build-WindowsApp.ps1 -Target both -Clean
+```
+
+Build output folders:
+- `dist/EVTXRipperGUI/EVTXRipperGUI.exe`
+- `dist/EVTXRipperTUI/EVTXRipperTUI.exe`
+
+Useful flags:
+- `-Target gui` or `-Target tui`
+- `-IncludeEnv` (copies your `.env` into the dist folder)
+- `-SkipDependencyInstall` (skip `requirements-build.txt` install)
+
 **👉 For detailed instructions, see [QUICKSTART.md](QUICKSTART.md)**
 
 ---
@@ -103,11 +118,13 @@ python chainsaw_frontend.py
 ```
 ├─ QUICKSTART.md          ⭐ START HERE (5-min setup)
 ├─ SETUP.md               📖 Complete reference guide
+├─ WAZUH_CHAINSAW_SUPPLEMENT.md 🛡️ Wazuh realtime supplement
 ├─ README.md              📋 This file (architecture)
 │
 ├─ .env                   ⚙️  Configuration file
 ├─ chainsaw_frontend.py   🐍 Python UI application
 ├─ ChainsawIntegration.ps1 🔧 PowerShell helper
+├─ ChainsawRealtimeWazuh.ps1 🔧 Realtime Wazuh runner
 │
 ├─ Export-AllEvtx.ps1     📤 EVTX export (existing)
 ├─ Export-AllEvtxRMM.ps1  📤 RMM integration (existing)
@@ -117,6 +134,7 @@ python chainsaw_frontend.py
 **Navigation Guide:**
 - **New Users**: Start with [QUICKSTART.md](QUICKSTART.md)
 - **Detailed Config**: See [SETUP.md](SETUP.md)
+- **Wazuh SIEM Feed**: See [WAZUH_CHAINSAW_SUPPLEMENT.md](WAZUH_CHAINSAW_SUPPLEMENT.md)
 - **Architecture**: Continue reading below
 
 ---
@@ -435,8 +453,10 @@ python chainsaw_frontend.py
 | `.env` | All configuration (edit this!) |
 | `chainsaw_frontend.py` | Main interactive UI |
 | `ChainsawIntegration.ps1` | PowerShell helper/integration |
+| `ChainsawRealtimeWazuh.ps1` | Rolling-window Chainsaw feed to Wazuh |
 | `QUICKSTART.md` | 5-minute setup guide |
 | `SETUP.md` | Complete reference manual |
+| `WAZUH_CHAINSAW_SUPPLEMENT.md` | Wazuh deployment and rule mapping |
 
 ### Common Tasks
 ```PowerShell

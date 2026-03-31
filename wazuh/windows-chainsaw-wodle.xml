@@ -1,0 +1,9 @@
+<wodle name="command">
+  <disabled>no</disabled>
+  <tag>windows_chainsaw</tag>
+  <command>Powershell.exe -ExecutionPolicy Bypass -File "C:\\Program Files (x86)\\ossec-agent\\active-response\\bin\\ChainsawRealtimeWazuh.ps1"</command>
+  <interval>5m</interval>
+  <ignore_output>yes</ignore_output>
+  <run_on_start>yes</run_on_start>
+  <timeout>0</timeout>
+</wodle>
