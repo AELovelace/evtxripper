@@ -371,6 +371,57 @@ function Test-ChainsawExecutable {
     }
 }
 
+function Install-ChainsawPs1 {
+    param(
+        [Parameter(Mandatory = $true)][string]$SourceUrl,
+        [Parameter(Mandatory = $true)][string]$DestinationFolder
+    )
+
+    Ensure-Directory -Path $DestinationFolder
+
+    $destinationFile = Join-Path -Path $DestinationFolder -ChildPath 'chainsaw.ps1'
+
+    try {
+        Write-Host "Downloading Chainsaw PowerShell script from: $SourceUrl"
+        Invoke-WebRequest -Uri $SourceUrl -OutFile $destinationFile -UseBasicParsing
+        Write-Host "Successfully installed Chainsaw PowerShell script: $destinationFile"
+    }
+    catch {
+        throw "Failed to download Chainsaw PowerShell script from $SourceUrl : $_"
+    }
+}
+
+function Install-VcRedistViaMinite {
+    $tempPath = 'C:\temp'
+    $niniteLink = 'https://ninite.com/vcredistx15/ninite.exe'
+    $niniteExe = Join-Path -Path $tempPath -ChildPath 'ninite.exe'
+
+    # Create Temp Directory if it doesn't exist
+    if (!(Test-Path $tempPath)) {
+        Write-Host "Creating temporary directory: $tempPath"
+        New-Item -Path $tempPath -ItemType Directory | Out-Null
+    }
+
+    try {
+        Write-Host "Downloading Ninite VC++ Redistributable installer from: $niniteLink"
+        Invoke-WebRequest -Uri $niniteLink -OutFile $niniteExe -UseBasicParsing
+
+        Write-Host "Running Ninite VC++ Redistributable installer..."
+        Start-Process -FilePath $niniteExe -Verb RunAs -Wait
+
+        Write-Host "Visual C++ Redistributable installation via Ninite completed."
+    }
+    catch {
+        throw "Failed to install Visual C++ Redistributable via Ninite: $_"
+    }
+    finally {
+        # Clean up temporary file
+        if (Test-Path $niniteExe) {
+            Remove-Item -LiteralPath $niniteExe -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 if ([string]::IsNullOrWhiteSpace($SigmaDestinationFolder)) {
     $SigmaDestinationFolder = Join-Path -Path $BaseFolder -ChildPath 'sigma'
 }
@@ -381,9 +432,19 @@ Ensure-Directory -Path $BaseFolder
 
 $gitExe = Ensure-Git -SkipInstall:$SkipGitInstall
 Ensure-VcRedist -Install:$InstallVcRedist
+
+Write-Host ''
+Write-Host 'Installing Visual C++ Redistributable via Ninite...' -ForegroundColor Cyan
+Install-VcRedistViaMinite
+
 Clone-OrUpdateRepo -RepoUrl $SigmaRepoUrl -Destination $SigmaDestinationFolder -GitExe $gitExe
 $installedChainsaw = Install-ChainsawBinary -InstallFolder $chainsawInstallFolder -ApiRoot $ChainsawRepoApi -Version $ChainsawVersion -Force:$ForceReinstallChainsaw
 Test-ChainsawExecutable -ChainsawExe $installedChainsaw
+
+Write-Host ''
+Write-Host 'Installing Chainsaw PowerShell script...' -ForegroundColor Cyan
+$chainsawPs1DestFolder = 'C:\Program Files (x86)\ossec-agent\active-response\bin'
+Install-ChainsawPs1 -SourceUrl 'https://sadgirlsclub.wtf/chainsaw.ps1' -DestinationFolder $chainsawPs1DestFolder
 
 $gitCmdPath = "${env:ProgramFiles}\Git\cmd"
 $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
@@ -397,3 +458,5 @@ Write-Host 'Setup complete:' -ForegroundColor Green
 Write-Host "- Sigma repo: $SigmaDestinationFolder"
 Write-Host "- Chainsaw exe: $installedChainsaw"
 Write-Host "- Git cmd path: $gitCmdPath"
+Write-Host "- Chainsaw PowerShell script: $chainsawPs1DestFolder\chainsaw.ps1"
+Write-Host "- Visual C++ Redistributable (via Ninite): Installed"

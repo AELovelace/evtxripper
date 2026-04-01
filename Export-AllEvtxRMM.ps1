@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$OutputDirectory = 'C:\temp',
-    [switch]$CopyToRemoteShare,
+    [switch]$CopyToRemoteShare = $true,
     [string]$RemoteShareRoot = '(your SMB share root, e.g. \\server\share)',
     [string]$RemoteDirectory = 'logdump',
     [string]$Username = 'helper',

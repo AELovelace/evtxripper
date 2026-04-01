@@ -5,12 +5,65 @@ import os
 import re
 import subprocess
 import json
+import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 import requests
+from dotenv import load_dotenv
+
+
+def get_launch_dir() -> str:
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def get_bundle_dir() -> str:
+    return getattr(sys, '_MEIPASS', get_launch_dir())
+
+
+def load_app_env() -> Optional[str]:
+    candidates = [
+        os.path.join(get_launch_dir(), '.env'),
+        os.path.join(os.getcwd(), '.env'),
+    ]
+
+    seen = set()
+    for candidate in candidates:
+        normalized = os.path.normcase(os.path.abspath(candidate))
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        if os.path.isfile(candidate):
+            load_dotenv(candidate)
+            return candidate
+
+    return None
+
+
+def resolve_runtime_path(path_value: str, must_exist: bool = False) -> str:
+    expanded = os.path.expandvars(os.path.expanduser(path_value or ''))
+    if not expanded:
+        return expanded
+
+    if os.path.isabs(expanded):
+        return expanded
+
+    candidates = [
+        os.path.join(get_launch_dir(), expanded),
+        os.path.join(get_bundle_dir(), expanded),
+        os.path.join(os.getcwd(), expanded),
+    ]
+
+    if must_exist:
+        for candidate in candidates:
+            if os.path.exists(candidate):
+                return candidate
+
+    return candidates[0]
 
 
 @dataclass
@@ -141,21 +194,51 @@ class ChainsawRunner:
         cmd.extend(evtx_paths)
         return cmd
 
-    def run_command(self, cmd: List[str]) -> Tuple[bool, str]:
+    def run_command(
+        self,
+        cmd: List[str],
+        output_callback: Optional[Callable[[str], None]] = None,
+    ) -> Tuple[bool, str]:
         try:
             sanitized_cmd = [str(part) for part in cmd if part is not None]
-            result = subprocess.run(sanitized_cmd, capture_output=True, timeout=300)
+            process = subprocess.Popen(
+                sanitized_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
+            )
 
-            stdout_text = (result.stdout or b"").decode("utf-8", errors="replace")
-            stderr_text = (result.stderr or b"").decode("utf-8", errors="replace")
-            output = stdout_text + stderr_text
+            output_lines: List[str] = []
+
+            try:
+                if process.stdout is not None:
+                    for line in iter(process.stdout.readline, ""):
+                        if line == "":
+                            break
+
+                        cleaned_line = line.rstrip("\r\n")
+                        output_lines.append(line)
+                        if output_callback is not None and cleaned_line:
+                            output_callback(cleaned_line)
+
+                result_code = process.wait(timeout=300)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+                return False, "Chainsaw execution timeout"
+            finally:
+                if process.stdout is not None:
+                    process.stdout.close()
+
+            output = "".join(output_lines)
 
             if not output.strip():
-                output = f"Command exited with code {result.returncode} and produced no decodable output."
+                output = f"Command exited with code {result_code} and produced no decodable output."
 
-            return result.returncode == 0, output
-        except subprocess.TimeoutExpired:
-            return False, "Chainsaw execution timeout"
+            return result_code == 0, output
         except Exception as exc:
             return False, f"Error running chainsaw: {exc}"
 
@@ -266,7 +349,7 @@ def generate_sigma_reports(
 
     endpoint_value = (endpoint or os.getenv('OLLAMA_ENDPOINT', 'http://100.66.64.45:11434')).rstrip('/')
     model_value = model or os.getenv('OLLAMA_MODEL', 'qwen3.5:4b-q8_0')
-    timeout_value = timeout if timeout is not None else int(os.getenv('OLLAMA_TIMEOUT', '120'))
+    timeout_value = timeout if timeout is not None else int(os.getenv('OLLAMA_TIMEOUT', '300'))
     try:
         num_ctx_value = int(os.getenv('OLLAMA_NUM_CTX', '128000'))
     except ValueError:
@@ -290,6 +373,7 @@ def generate_sigma_reports(
         provenance_rows = _load_provenance_rows(manifest_path)
         provenance_markdown = _format_provenance_markdown(provenance_rows)
         provenance_prompt = _format_provenance_prompt(provenance_rows)
+        benign_paths_prompt = _format_known_benign_paths_prompt()
 
         prompt = (
             f"Respond in {language_value} only. Do not use any other language.\n"
@@ -303,6 +387,7 @@ def generate_sigma_reports(
             f"Source EVTX: {evtx_name}\n\n"
             "Use the provenance manifest mapping as authoritative for channel/file origin.\n"
             "Do not infer source paths that are not present in the manifest.\n\n"
+            f"Known benign export-path context:\n{benign_paths_prompt}\n\n"
             f"Provenance manifest data:\n{provenance_prompt}\n\n"
             f"CSV:\n{csv_excerpt}"
         )
@@ -326,12 +411,29 @@ def generate_sigma_reports(
                 report_file.write(f"Generated: {datetime.now().isoformat()}\n\n")
                 report_file.write(f"Source CSV: {sigma_csv}\n\n")
                 report_file.write(model_response)
+                report_file.write("\n\n## Analysis Context & Assumptions\n")
+                report_file.write("The following export-chain paths are treated as expected infrastructure ")
+                report_file.write("context and are **not** flagged as malicious by themselves:\n\n")
+                report_file.write(benign_paths_prompt)
                 report_file.write("\n\n## Deterministic Provenance Manifest\n")
                 report_file.write(provenance_markdown)
 
             report_count += 1
         except Exception as exc:
+            with open(report_path, 'w', encoding='utf-8') as report_file:
+                report_file.write(f"# Sigma Report for {evtx_name}\n\n")
+                report_file.write(f"Generated: {datetime.now().isoformat()}\n\n")
+                report_file.write(f"Source CSV: {sigma_csv}\n\n")
+                report_file.write("## Report Generation Warning\n")
+                report_file.write("Automated Ollama analysis did not complete successfully for this run.\n\n")
+                report_file.write(f"- Error: {exc}\n")
+                report_file.write(f"- Endpoint: {endpoint_value}\n")
+                report_file.write(f"- Model: {model_value}\n\n")
+                report_file.write("## Deterministic Provenance Manifest\n")
+                report_file.write(provenance_markdown)
+
             errors.append(f"{evtx_name}: {exc}")
+            report_count += 1
 
     if errors:
         return report_count, "; ".join(errors)
@@ -347,6 +449,35 @@ def _resolve_manifest_path(evtx_path: str) -> Optional[str]:
     for candidate in candidates:
         if os.path.isfile(candidate):
             return candidate
+
+    evtx_dir = os.path.dirname(evtx_path) or '.'
+    evtx_name = os.path.basename(evtx_path)
+    evtx_stem = os.path.splitext(evtx_name)[0]
+    expected_name_norm = _normalize_manifest_match_key(evtx_name)
+    expected_stem_norm = _normalize_manifest_match_key(evtx_stem)
+
+    try:
+        with os.scandir(evtx_dir) as entries:
+            for entry in entries:
+                if not entry.is_file():
+                    continue
+                filename = entry.name
+                if not filename.lower().endswith('.manifest.json'):
+                    continue
+
+                exported_name = filename[:-len('.manifest.json')]
+                exported_stem = os.path.splitext(exported_name)[0]
+                exported_name_norm = _normalize_manifest_match_key(exported_name)
+                exported_stem_norm = _normalize_manifest_match_key(exported_stem)
+
+                if (
+                    exported_name_norm == expected_name_norm
+                    or exported_stem_norm == expected_stem_norm
+                ):
+                    return entry.path
+    except OSError:
+        return None
+
     return None
 
 
@@ -355,21 +486,32 @@ def _load_provenance_rows(manifest_path: Optional[str]) -> List[Tuple[str, str]]
         return []
 
     try:
-        with open(manifest_path, 'r', encoding='utf-8', errors='replace') as handle:
-            payload = json.load(handle)
+        with open(manifest_path, 'rb') as handle:
+            raw_payload = handle.read()
+
+        payload = None
+        for encoding in ('utf-8-sig', 'utf-16', 'utf-16-le', 'utf-16-be', 'utf-8'):
+            try:
+                payload = json.loads(raw_payload.decode(encoding))
+                break
+            except Exception:
+                continue
+
+        if payload is None:
+            return []
     except Exception:
         return []
 
     rows: List[Tuple[str, str]] = []
-    channels = payload.get('Channels') if isinstance(payload, dict) else None
+    channels = _dict_get_case_insensitive(payload, ['Channels', 'channels']) if isinstance(payload, dict) else None
     if not isinstance(channels, list):
         return []
 
     for item in channels:
         if not isinstance(item, dict):
             continue
-        channel = str(item.get('Channel') or '').strip()
-        original_path = str(item.get('OriginalPath') or '').strip()
+        channel = str(_dict_get_case_insensitive(item, ['Channel', 'channel', 'LogName', 'log_name', 'Name', 'name']) or '').strip()
+        original_path = str(_dict_get_case_insensitive(item, ['OriginalPath', 'original_path', 'LogFilePath', 'log_file_path', 'FilePath', 'file_path', 'Path', 'path']) or '').strip()
         if channel:
             rows.append((channel, original_path or '(unknown)'))
 
@@ -384,6 +526,22 @@ def _format_provenance_prompt(rows: List[Tuple[str, str]]) -> str:
     return "\n".join(lines)
 
 
+def _format_known_benign_paths_prompt() -> str:
+    """Provide path-context guardrails to reduce false positives in AI summaries."""
+    configured_remote_dir = (os.getenv('REMOTE_DIRECTORY', 'logdump') or 'logdump').strip()
+    names = {'logdump', configured_remote_dir}
+    normalized = sorted({name for name in names if name})
+
+    lines = [
+        '- Treat export staging locations as expected infrastructure context unless accompanied by independent malicious behavior.',
+        '- Do not classify path location alone as malicious, suspicious, or attacker-controlled.',
+        '- Specifically treat references to paths containing these folder names as expected export-chain artifacts:'
+    ]
+    lines.extend([f'  - {name}' for name in normalized])
+
+    return "\n".join(lines)
+
+
 def _format_provenance_markdown(rows: List[Tuple[str, str]]) -> str:
     if not rows:
         return "No provenance manifest was available for this EVTX file.\n"
@@ -395,3 +553,21 @@ def _format_provenance_markdown(rows: List[Tuple[str, str]]) -> str:
         output.append(f"| {safe_channel} | {safe_path} |")
 
     return "\n".join(output) + "\n"
+
+
+def _normalize_manifest_match_key(value: str) -> str:
+    """Normalize names for resilient EVTX/manifest basename matching."""
+    return re.sub(r'[^a-z0-9]', '', (value or '').lower())
+
+
+def _dict_get_case_insensitive(payload: dict, keys: List[str]):
+    """Return the first matching key from payload, case-insensitively."""
+    if not isinstance(payload, dict):
+        return None
+
+    keymap = {str(k).lower(): v for k, v in payload.items()}
+    for key in keys:
+        value = keymap.get(key.lower())
+        if value is not None:
+            return value
+    return None

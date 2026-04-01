@@ -104,8 +104,11 @@ Build output folders:
 - `dist/EVTXRipperGUI/EVTXRipperGUI.exe`
 - `dist/EVTXRipperTUI/EVTXRipperTUI.exe`
 
+The build script now defaults to `onefile` packaging. This is the preferred layout for running from a UNC/network share because the bundled Python runtime extracts locally before launch instead of loading `python314.dll` directly from the share.
+
 Useful flags:
 - `-Target gui` or `-Target tui`
+- `-Layout onefile` or `-Layout onedir`
 - `-IncludeEnv` (copies your `.env` into the dist folder)
 - `-SkipDependencyInstall` (skip `requirements-build.txt` install)
 
