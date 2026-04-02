@@ -28,12 +28,14 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QHeaderView,
     QHBoxLayout,
     QLabel,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMenu,
     QPushButton,
     QSplitter,
     QStackedWidget,
@@ -418,12 +420,14 @@ class DataPane(QWidget):
         self._csv_view.setWordWrap(True)
         self._csv_view.setAlternatingRowColors(True)
         self._csv_view.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self._csv_view.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._csv_view.setSelectionBehavior(QAbstractItemView.SelectItems)
         self._csv_view.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self._csv_view.horizontalHeader().setStretchLastSection(False)
         self._csv_view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
         self._csv_view.verticalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self._csv_view.verticalHeader().setDefaultSectionSize(60)
+        self._csv_view.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._csv_view.customContextMenuRequested.connect(self._show_csv_context_menu)
 
         self._csv_fit_btn.clicked.connect(self._csv_view.resizeRowsToContents)
         csv_layout.addWidget(self._csv_view)
@@ -467,6 +471,43 @@ class DataPane(QWidget):
             # Treat non-JSON as plain text shown in tree
             data = {"parse_error": "File could not be decoded as JSON.", "raw": raw[:2000]}
         self._json_widget.load_data(data)
+
+    def _show_csv_context_menu(self, pos) -> None:
+        menu = QMenu(self)
+        copy_action = menu.addAction("Copy Selected")
+        chosen = menu.exec(self._csv_view.viewport().mapToGlobal(pos))
+        if chosen == copy_action:
+            self._copy_selected_csv_cells()
+
+    def _copy_selected_csv_cells(self) -> None:
+        indexes = self._csv_view.selectionModel().selectedIndexes()
+        if not indexes:
+            return
+
+        row_map: dict[int, dict[int, str]] = {}
+        min_col: int | None = None
+        max_col: int | None = None
+
+        for index in indexes:
+            row = index.row()
+            col = index.column()
+            value = self._csv_model.data(index, Qt.DisplayRole)
+            row_map.setdefault(row, {})[col] = "" if value is None else str(value)
+            if min_col is None or col < min_col:
+                min_col = col
+            if max_col is None or col > max_col:
+                max_col = col
+
+        if min_col is None or max_col is None:
+            return
+
+        lines: List[str] = []
+        for row in sorted(row_map.keys()):
+            cols = row_map[row]
+            line = "\t".join(cols.get(col, "") for col in range(min_col, max_col + 1))
+            lines.append(line)
+
+        QApplication.clipboard().setText("\n".join(lines))
 
 
 # ---------------------------------------------------------------------------

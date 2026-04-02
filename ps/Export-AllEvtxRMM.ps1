@@ -1,3 +1,4 @@
+##this script is designed to work in atera. Just change the remoteshareroot or add a {[]} variable in the share location
 [CmdletBinding()]
 param(
     [string]$OutputDirectory = 'C:\temp',

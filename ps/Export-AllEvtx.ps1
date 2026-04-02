@@ -1,3 +1,4 @@
+#this is for local pulls
 [CmdletBinding()]
 param(
     [string]$OutputDirectory = 'C:\temp',
