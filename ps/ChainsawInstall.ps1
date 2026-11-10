@@ -422,6 +422,31 @@ function Install-VcRedistViaMinite {
     }
 }
 
+function Install-SigmaUpdateTask {
+    param(
+        [Parameter(Mandatory = $true)][string]$SourceUrl,
+        [Parameter(Mandatory = $true)][string]$DestinationFolder,
+        [string]$TaskName = 'Chainsaw Sigma Update'
+    )
+
+    Ensure-Directory -Path $DestinationFolder
+    $scriptPath = Join-Path -Path $DestinationFolder -ChildPath 'sigma-update.ps1'
+
+    Write-Host "Downloading Sigma update script from: $SourceUrl"
+    Invoke-WebRequest -Uri $SourceUrl -OutFile $scriptPath -UseBasicParsing
+
+    # Daily at 03:00 plus up to 2h random delay, so the fleet doesn't hit GitHub at once.
+    # StartWhenAvailable catches up on PCs that were off at the scheduled time.
+    $action    = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`""
+    $trigger   = New-ScheduledTaskTrigger -Daily -At 3am -RandomDelay (New-TimeSpan -Hours 2)
+    $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+    $settings  = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 30)
+    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
+
+    Write-Host "Registered scheduled task '$TaskName' -> $scriptPath"
+    return $scriptPath
+}
+
 if ([string]::IsNullOrWhiteSpace($SigmaDestinationFolder)) {
     $SigmaDestinationFolder = Join-Path -Path $BaseFolder -ChildPath 'sigma'
 }
@@ -446,6 +471,10 @@ Write-Host 'Installing Chainsaw PowerShell script...' -ForegroundColor Cyan
 $chainsawPs1DestFolder = 'C:\Program Files (x86)\ossec-agent\active-response\bin'
 Install-ChainsawPs1 -SourceUrl 'https://sadgirlsclub.wtf/chainsaw.ps1' -DestinationFolder $chainsawPs1DestFolder
 
+Write-Host ''
+Write-Host 'Installing daily Sigma update task...' -ForegroundColor Cyan
+$sigmaUpdateScript = Install-SigmaUpdateTask -SourceUrl 'https://sadgirlsclub.wtf/sigma-update.ps1' -DestinationFolder $BaseFolder
+
 $gitCmdPath = "${env:ProgramFiles}\Git\cmd"
 $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
 if ($machinePath -notlike "*$chainsawInstallFolder*") {
@@ -459,4 +488,5 @@ Write-Host "- Sigma repo: $SigmaDestinationFolder"
 Write-Host "- Chainsaw exe: $installedChainsaw"
 Write-Host "- Git cmd path: $gitCmdPath"
 Write-Host "- Chainsaw PowerShell script: $chainsawPs1DestFolder\chainsaw.ps1"
+Write-Host "- Sigma update: $sigmaUpdateScript (scheduled task 'Chainsaw Sigma Update', daily)"
 Write-Host "- Visual C++ Redistributable (via Ninite): Installed"
