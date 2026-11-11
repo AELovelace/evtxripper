@@ -35,9 +35,10 @@ if (!(Test-Path "$base\chainsaw.exe") -or !(Test-Path $windows_path) -or !(Test-
     exit 1
 }
 
-# Analyse events recorded in last 5 Minutes. Convert Start Date to Timestamp
-$start_date = (Get-Date).AddMinutes(-5)
-$from = Get-Date -Date $start_date -UFormat '+%Y-%m-%dT%H:%M:%S'
+# Analyse events recorded in last 5 Minutes.
+# Chainsaw reads --from as UTC (event timestamps are UTC), so build it in UTC.
+# Local time here made every 5-minute hunt cover ~8 hours on Pacific-time PCs.
+$from = (Get-Date).ToUniversalTime().AddMinutes(-5).ToString('yyyy-MM-ddTHH:mm:ss')
 
 # Create Chainsaw Output Folder if it doesn't exist
 $chainsaw_output = "$env:TMP\chainsaw_output"

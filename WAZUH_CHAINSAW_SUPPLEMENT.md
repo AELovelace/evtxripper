@@ -52,14 +52,24 @@ CHAINSAW_REALTIME_USE_CUSTOM_RULES=false
 1. Copy `ChainsawRealtimeWazuh.ps1` to:
    - `C:\Program Files (x86)\ossec-agent\active-response\bin\`
 2. Ensure Chainsaw binary, Sigma path, and mapping path in `.env` are valid on endpoint.
-3. Confirm Wazuh monitors the output file as JSON:
+3. Confirm Wazuh already monitors the output file. The default Windows agent `ossec.conf` has this entry; do **not** add a second `<localfile>` for the same file, or every line is read and alerted twice:
 
 ```xml
 <localfile>
-  <location>C:\Program Files (x86)\ossec-agent\active-response\active-responses.log</location>
-  <log_format>json</log_format>
+  <location>active-response\active-responses.log</location>
+  <log_format>syslog</log_format>
 </localfile>
 ```
+
+Check with:
+
+```powershell
+Select-String -Path 'C:\Program Files (x86)\ossec-agent\ossec.conf','C:\Program Files (x86)\ossec-agent\shared\agent.conf' -Pattern 'active-responses.log'
+```
+
+Exactly one match is correct. The Wazuh decoder picks up the JSON lines from the syslog-format entry.
+
+> Time windows: Chainsaw reads `--from`/`--to` as UTC. Always build them from `(Get-Date).ToUniversalTime()`. A local-time `--from` on a Pacific-time PC makes a "last 5 minutes" hunt cover about 8 hours, and one event re-alerts on every run (seen 2026-11-11 on Win2019SRVR and EH-OPI).
 
 4. Add the command wodle from `wazuh/windows-chainsaw-wodle.xml` to endpoint `ossec.conf`.
 5. Add `wazuh/200050-chainsaw-sigma-rules.xml` to manager rules and restart manager.
