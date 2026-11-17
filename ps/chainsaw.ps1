@@ -47,7 +47,9 @@ If(!(test-path $chainsaw_output)) {
 }
 
 # Run Chainsaw and store JSONs in TMP folder
-& "$base\chainsaw.exe" hunt C:\Windows\System32\winevt -s $windows_path --mapping $mapping --from $from --output "$chainsaw_output\results.json" --json --level high --level critical
+# --skip-errors: one unreadable .evtx (e.g. Intel-SST-DVD%4DVD_ETW_Telemetry.evtx on DESKTOP-GGFHLBU,
+# 2026-11-17) otherwise aborts the whole hunt with exit 1; skip that file and keep hunting the rest.
+& "$base\chainsaw.exe" hunt C:\Windows\System32\winevt -s $windows_path --mapping $mapping --from $from --output "$chainsaw_output\results.json" --json --level high --level critical --skip-errors
 $hunt_exit = $LASTEXITCODE
 
 # Convert JSON to new line entry for every 'group'

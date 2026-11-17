@@ -94,6 +94,29 @@ PowerShell.exe -ExecutionPolicy Bypass -File .\ChainsawRealtimeWazuh.ps1 -EnvPat
 3. Sysmon-heavy environments can be noisy; curate Sigma rules and exclusions early.
 4. If running on many endpoints, avoid `CHAINSAW_UPDATE_SIGMA=true` every cycle. Prefer scheduled updates.
 
+## Checking the 5-minute hunt (rules 200056 / 200057)
+
+The active-response `chainsaw.ps1` writes one status line per run to `active-responses.log`:
+
+| Rule | Level | Meaning | Shows in Wazuh alerts? |
+|---|---|---|---|
+| 200056 | 1 | Hunt completed | **No** (below the alert log level) |
+| 200057 | 13 | Hunt failed (`exit code N`, or files missing) | Yes |
+
+So a healthy agent is **silent**: no 200057 for 10+ minutes while the PC is on = working.
+A quiet night can just mean the PC was off.
+
+- **Check in Wazuh (Mnemerynne API):** *Alerts* with `agent=<PC>`, `rule_group=chainsaw`, `hours=1`; or *Alert timeline* with `rule_id=200055,200057`.
+- **See the real error:** `chainsaw.ps1` discards Chainsaw's own output, so Wazuh only shows the exit code.
+  Run `ps/Test-ChainsawHunt.ps1` via Atera as System on the PC. It runs the same hunt with stderr
+  captured, lists the required files and the Sigma rule count, and changes nothing.
+- **Known cause (2026-11-17, DESKTOP-GGFHLBU):** one unreadable log
+  (`Intel-SST-DVD%4DVD_ETW_Telemetry.evtx`) made Chainsaw abort with exit 1 ("An error occurred while
+  trying to deserialize evtx stream"). `chainsaw.ps1` now passes `--skip-errors`, so a bad file is
+  skipped and the rest of the hunt still runs.
+- **After changing `chainsaw.ps1` or `sigma-update.ps1`:** run `python python/build_atera_update.py`
+  to re-embed them (base64 + SHA256) in `ps/Atera-ChainsawUpdate.ps1`, then push that via Atera.
+
 ## Example Direct Invocation
 
 ```powershell
